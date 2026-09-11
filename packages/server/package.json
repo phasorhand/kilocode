@@ -1,24 +1,26 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "@opencode-ai/server",
-  "version": "7.2.6",
+  "version": "7.6.2",
+  "private": true,
   "type": "module",
   "license": "MIT",
   "exports": {
-    ".": "./src/index.ts",
-    "./openapi": "./src/openapi.ts",
-    "./definition": "./src/definition/index.ts",
-    "./definition/api": "./src/definition/api.ts",
-    "./api": "./src/api/index.ts"
+    "./*": "./src/*.ts"
   },
-  "files": [
-    "dist"
-  ],
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "build": "tsc"
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@opencode-ai/core": "workspace:*",
+    "drizzle-orm": "catalog:",
+    "effect": "catalog:",
+    "@opencode-ai/protocol": "workspace:*"
   },
   "devDependencies": {
-    "typescript": "catalog:"
-  }
+    "@tsconfig/bun": "catalog:",
+    "@types/bun": "catalog:",
+    "@typescript/native-preview": "catalog:"
+  },
+  "peerDependencies": {}
 }

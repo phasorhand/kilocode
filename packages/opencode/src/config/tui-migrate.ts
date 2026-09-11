@@ -1,34 +1,25 @@
 import path from "path"
+import { access, constants } from "fs/promises" // kilocode_change
 import { type ParseError as JsoncParseError, applyEdits, modify, parse as parseJsonc } from "jsonc-parser"
 import { unique } from "remeda"
-import z from "zod"
-import { ConfigPaths } from "./paths"
-import { TuiInfo, TuiOptions } from "./tui-schema"
-import { Instance } from "@/project/instance"
-import { Flag } from "@/flag/flag"
-import { Log } from "@/util/log"
+import { Option, Schema } from "effect"
+import { TuiConfig } from "@opencode-ai/tui/config"
+import { Flag } from "@opencode-ai/core/flag/flag"
+import { Global } from "@opencode-ai/core/global"
 import { Filesystem } from "@/util/filesystem"
-import { Global } from "@/global"
+import * as ConfigPaths from "@/config/paths"
 
-const log = Log.create({ service: "tui.migrate" })
+const TUI_SCHEMA_URL = "https://app.kilo.ai/tui.json" // kilocode_change
 
-const TUI_SCHEMA_URL = "https://opencode.ai/tui.json"
-
-const LegacyTheme = TuiInfo.shape.theme.optional()
-const LegacyRecord = z.record(z.string(), z.unknown()).optional()
-
-const TuiLegacy = z
-  .object({
-    scroll_speed: TuiOptions.shape.scroll_speed.catch(undefined),
-    scroll_acceleration: TuiOptions.shape.scroll_acceleration.catch(undefined),
-    diff_style: TuiOptions.shape.diff_style.catch(undefined),
-  })
-  .strip()
+const decodeTheme = Schema.decodeUnknownOption(Schema.String)
+const decodeRecord = Schema.decodeUnknownOption(Schema.Record(Schema.String, Schema.Unknown))
+const decodeScrollSpeed = Schema.decodeUnknownOption(TuiConfig.ScrollSpeed)
+const decodeScrollAcceleration = Schema.decodeUnknownOption(TuiConfig.ScrollAcceleration)
+const decodeDiffStyle = Schema.decodeUnknownOption(TuiConfig.DiffStyle)
 
 interface MigrateInput {
+  cwd: string
   directories: string[]
-  custom?: string
-  managed: string
 }
 
 /**
@@ -39,22 +30,19 @@ interface MigrateInput {
 export async function migrateTuiConfig(input: MigrateInput) {
   const opencode = await opencodeFiles(input)
   for (const file of opencode) {
-    const source = await Filesystem.readText(file).catch((error) => {
-      log.warn("failed to read config for tui migration", { path: file, error })
-      return undefined
-    })
+    const source = await Filesystem.readText(file).catch(() => undefined)
     if (!source) continue
     const errors: JsoncParseError[] = []
     const data = parseJsonc(source, errors, { allowTrailingComma: true })
     if (errors.length || !data || typeof data !== "object" || Array.isArray(data)) continue
 
-    const theme = LegacyTheme.safeParse("theme" in data ? data.theme : undefined)
-    const keybinds = LegacyRecord.safeParse("keybinds" in data ? data.keybinds : undefined)
-    const legacyTui = LegacyRecord.safeParse("tui" in data ? data.tui : undefined)
+    const theme = decodeTheme("theme" in data ? data.theme : undefined)
+    const keybinds = decodeRecord("keybinds" in data ? data.keybinds : undefined)
+    const legacyTui = decodeRecord("tui" in data ? data.tui : undefined)
     const extracted = {
-      theme: theme.success ? theme.data : undefined,
-      keybinds: keybinds.success ? keybinds.data : undefined,
-      tui: legacyTui.success ? legacyTui.data : undefined,
+      theme: Option.getOrUndefined(theme),
+      keybinds: Option.getOrUndefined(keybinds),
+      tui: Option.getOrUndefined(legacyTui),
     }
     const tui = extracted.tui ? normalizeTui(extracted.tui) : undefined
     if (extracted.theme === undefined && extracted.keybinds === undefined && !tui) continue
@@ -72,44 +60,51 @@ export async function migrateTuiConfig(input: MigrateInput) {
 
     const wrote = await Filesystem.write(target, JSON.stringify(payload, null, 2))
       .then(() => true)
-      .catch((error) => {
-        log.warn("failed to write tui migration target", { from: file, to: target, error })
-        return false
-      })
+      .catch(() => false)
     if (!wrote) continue
 
     const stripped = await backupAndStripLegacy(file, source)
-    if (!stripped) {
-      log.warn("tui config migrated but source file was not stripped", { from: file, to: target })
-      continue
-    }
-    log.info("migrated tui config", { from: file, to: target })
+    if (!stripped) continue
   }
 }
 
-function normalizeTui(data: Record<string, unknown>) {
-  const parsed = TuiLegacy.parse(data)
-  if (
-    parsed.scroll_speed === undefined &&
+function normalizeTui(data: Record<string, unknown>):
+  | {
+      scroll_speed: number | undefined
+      scroll_acceleration: { enabled: boolean } | undefined
+      diff_style: "auto" | "stacked" | undefined
+    }
+  | undefined {
+  const parsed = {
+    scroll_speed: Option.getOrUndefined(decodeScrollSpeed(data.scroll_speed)),
+    scroll_acceleration: Option.getOrUndefined(decodeScrollAcceleration(data.scroll_acceleration)),
+    diff_style: Option.getOrUndefined(decodeDiffStyle(data.diff_style)),
+  }
+  return parsed.scroll_speed === undefined &&
     parsed.diff_style === undefined &&
     parsed.scroll_acceleration === undefined
-  ) {
-    return
-  }
-  return parsed
+    ? undefined
+    : parsed
 }
 
 async function backupAndStripLegacy(file: string, source: string) {
+  // kilocode_change start
+  // On POSIX, `rename()` can overwrite a read-only file when the parent directory is
+  // writable, bypassing file-level write permissions. Check write access explicitly so
+  // that callers can distinguish "strip succeeded" from "strip skipped" correctly.
+  const writable = await access(file, constants.W_OK)
+    .then(() => true)
+    .catch(() => false)
+  if (!writable) return false
+  // kilocode_change end
+
   const backup = file + ".tui-migration.bak"
   const hasBackup = await Filesystem.exists(backup)
   const backed = hasBackup
     ? true
     : await Filesystem.write(backup, source)
         .then(() => true)
-        .catch((error) => {
-          log.warn("failed to backup source config during tui migration", { path: file, backup, error })
-          return false
-        })
+        .catch(() => false)
   if (!backed) return false
 
   const text = ["theme", "keybinds", "tui"].reduce((acc, key) => {
@@ -124,27 +119,21 @@ async function backupAndStripLegacy(file: string, source: string) {
   }, source)
 
   return Filesystem.write(file, text)
-    .then(() => {
-      log.info("stripped tui keys from server config", { path: file, backup })
-      return true
-    })
-    .catch((error) => {
-      log.warn("failed to strip legacy tui keys from server config", { path: file, backup, error })
-      return false
-    })
+    .then(() => true)
+    .catch(() => false)
 }
 
-// kilocode_change start: use kilo directory everywhere
-async function opencodeFiles(input: { directories: string[]; managed: string }) {
+async function opencodeFiles(input: { directories: string[]; cwd: string }) {
+  // kilocode_change start: use kilo directory everywhere
   const project = Flag.KILO_DISABLE_PROJECT_CONFIG
     ? []
-    : await ConfigPaths.projectFiles("kilo", Instance.directory, Instance.worktree)
+    : await Filesystem.findUp(["kilo.json", "kilo.jsonc"], input.cwd, undefined, { rootFirst: true })
   const files = [...project, ...ConfigPaths.fileInDirectory(Global.Path.config, "kilo")]
+  // kilocode_change end
   for (const dir of unique(input.directories)) {
     files.push(...ConfigPaths.fileInDirectory(dir, "kilo"))
   }
   if (Flag.KILO_CONFIG) files.push(Flag.KILO_CONFIG)
-  files.push(...ConfigPaths.fileInDirectory(input.managed, "kilo")) // kilocode_change
 
   const existing = await Promise.all(
     unique(files).map(async (file) => {
@@ -154,4 +143,3 @@ async function opencodeFiles(input: { directories: string[]; managed: string }) 
   )
   return existing.filter((file): file is string => !!file)
 }
-// kilocode_change end

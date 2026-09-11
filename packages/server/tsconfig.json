@@ -1,15 +1,9 @@
 {
-  "$schema": "https://json.schemastore.org/tsconfig.json",
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "@tsconfig/bun/tsconfig.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "rootDir": "src",
-    "outDir": "dist",
-    "module": "nodenext",
-    "declaration": true,
-    "moduleResolution": "nodenext",
-    "lib": ["es2022", "dom", "dom.iterable"],
-    "strict": true,
-    "skipLibCheck": true
-  },
-  "include": ["src"]
+    "types": ["bun"], // kilocode_change - required when typechecking imported core sources
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "noUncheckedIndexedAccess": false
+  }
 }
